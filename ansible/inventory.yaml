@@ -1,0 +1,19 @@
+virtualmachines:
+  hosts:
+    vm01:
+      ansible_host: 10.0.0.152
+    temp:
+      ansible_host: 139.177.194.69
+      ansible_user: root
+    local:
+      ansible_connection: local
+      ansible_python_interpreter: /usr/bin/python3
+  vars:
+    server_name_nginx: testwp.example.com
+    path: /var/www/html
+    repo_path: /var/www/html/wp
+    staging: --staging
+    server_name: testwp.example.com
+    certbot_domains: -d testwp.example.com
+    email: email@example.com
+    password: supersmartpassword

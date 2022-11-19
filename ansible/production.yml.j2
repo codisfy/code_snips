@@ -1,0 +1,71 @@
+version: "3.3"
+
+networks:
+  wordpress:
+    driver: bridge
+
+services:
+  site:
+    build: ./nginx/prod
+    container_name: wp-site
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../wordpress:/var/www/html:delegated
+      - ./nginx/prod/certbot/conf:/etc/letsencrypt
+      - ./nginx/prod/certbot/www:/var/www/certbot
+    depends_on:
+      - db
+      - php
+    networks:
+      - wordpress
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
+
+  db:
+    image: mysql
+    container_name: wp-db
+    restart: always
+    ports:
+      - 3306:3306
+    environment:
+      MYSQL_DATABASE: wp
+      MYSQL_USER: wp
+      MYSQL_PASSWORD: {{ password }}
+      MYSQL_ROOT_PASSWORD: {{ password }}
+      SERVICE_TAGS: dev
+      SERVICE_NAME: wp-db
+    volumes:
+      - ./mysql:/docker-entrypoint-initdb.d
+      - ./mysql-lib:/var/lib/mysql:delegated
+    networks:
+      - wordpress
+
+  php:
+    build:
+      context: ./php
+    container_name: wp-php
+    volumes:
+      - ../wordpress:/var/www/html:delegated
+    networks:
+      - wordpress
+
+  wp:
+    build:
+      context: ./php
+    container_name: wp
+    entrypoint: [ 'wp', '--allow-root' ]
+    volumes:
+      - ../wordpress:/var/www/html:delegated
+    networks:
+      - wordpress
+
+  certbot:
+    image: certbot/certbot
+    container_name: wp-certbot
+    restart: unless-stopped
+    volumes:
+      - ./nginx/prod/certbot/conf:/etc/letsencrypt
+      - ./nginx/prod/certbot/www:/var/www/certbot
+      - /var/log/certbot:/var/log/letsencrypt
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"

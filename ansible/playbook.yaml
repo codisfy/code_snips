@@ -1,0 +1,214 @@
+- name: Setup EWP wordpress
+  hosts: temp
+  become: yes
+
+
+  tasks:
+    - name: Ensure group 'docker' exists
+      group:
+        name: docker
+        state: present
+
+    - name: Create the user 'deployer'
+      user:
+        name: deployer
+        shell: /bin/bash
+        password: $6$OStSJfA6FA$ffSDaJBWfSpmnwlC6QWJwLG3PgZWQhPYUSezmRvSiUFpwSWy/57KuUuLg/4yGBpKx2TWYsPDz9Yq7nL2I2XT3/
+
+    - name: Assign 'deployer' to the 'docker' group
+      user:
+        name: deployer
+        groups: docker
+        append: yes
+
+    - name: Create a directory named 'html'
+      file:
+        path: "{{ path }}"
+        state: directory
+        mode: 0750
+        group: docker
+
+    - name: add github ssh key
+      copy:
+        src: deploy_key
+        dest: /root/.ssh/id_rsa.github
+        owner: root
+        group: root
+        mode: 0600
+
+    - name: configure ssh to use ansible key for github.com
+      template:
+        src: ssh_config.j2
+        dest: /root/.ssh/config
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Check github.com is in known_hosts
+      shell: ssh-keygen -F github.com
+      register: github_known_hosts
+      ignore_errors: yes
+
+    - name: Add github.com to known hosts
+      shell: "ssh-keyscan -H github.com >> ~/.ssh/known_hosts"
+      when: github_known_hosts.stdout == ""
+
+    - name: Clone the project into the html directory
+      git:
+        repo: git@github.com-wp:Appfoster/wp.git
+        dest: "{{ repo_path }}"
+        version: docker-main
+        key_file: /root/.ssh/id_rsa.github
+        force: yes
+        clone: yes
+        update: yes
+
+    - name: Check if wp-config.php exists
+      stat:
+        path: "{{ repo_path }}/wordpress/wp-config.php"
+      register: wp_config
+
+    - name: create wp-config.php
+      copy:
+        src: "{{ repo_path }}/wordpress/wp-config-sample.php"
+        dest: "{{ repo_path }}/wordpress/wp-config.php"
+        remote_src: yes
+        owner: deployer
+        group: deployer
+        mode: 0744
+      when: not wp_config.stat.exists
+
+    - name: Replace the database password in wp-config.php
+      replace:
+        path: "{{ repo_path }}/wordpress/wp-config.php"
+        regexp: 'password_here'
+        replace: '{{ password }}'
+
+    - name: copy the nginx config file
+      template:
+        src: default.conf.j2
+        dest: "{{ repo_path }}/docker/nginx/prod/default.conf"
+        owner: deployer
+        group: docker
+        mode: 0744
+
+    - name: Add production docker-compose file
+      template:
+        src: production.yml.j2
+        dest: "{{ repo_path }}/docker/production.yml"
+        owner: deployer
+        group: docker
+        mode: 0744
+
+
+    - name: Install Dependencies
+      apt:
+        pkg:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - python3-pip
+          - virtualenv
+          - python3-setuptools
+        state: latest
+        update_cache: true
+
+    - name: Add Docker’s official GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker’s repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable
+        state: present
+
+    - name: Install Docker
+      apt:
+        pkg:
+          - containerd.io
+          - docker-ce-cli
+          - docker-ce
+          - docker-compose
+        state: latest
+        update_cache: true
+
+    - name: Check docker started
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Restart Docker
+      service:
+        name: docker
+        state: restarted
+
+    - name: Check if the server cert directory with certs already exists
+      stat:
+        path: "{{ repo_path }}/docker/nginx/prod/data/certbot/conf/live/{{ server_name }}/fullchain.pem"
+      register: cert
+
+    - name: Replace URL in database
+      replace:
+        path: "{{ repo_path }}/docker/mysql/database.sql"
+        regexp: 'wp.local'
+        replace: '{{ server_name }}'
+
+    - name: Copy the dummy certs to the  directory
+      copy:
+        src: ./dummy-certs/
+        dest: "{{ repo_path }}/docker/nginx/prod/certbot/conf/live/{{ server_name }}/"
+        owner: deployer
+        group: docker
+        mode: 0777
+      when: not cert.stat.exists
+
+    - name: Run Docker containers
+      shell: sudo -H -u deployer bash -c "docker-compose -f production.yml up -d --build"
+      args:
+        chdir: "{{ repo_path }}/docker"
+
+    - name: Remove the dummy certificate before requesting new one
+      community.docker.docker_container_exec:
+        container: wp-certbot
+        command: rm -rf /etc/letsencrypt/live/{{ server_name }}
+      register: result
+
+    - name: Print stdout
+      debug:
+        var: result
+
+
+    - name: Requesting letsencrypt certificate
+      community.docker.docker_container_exec:
+        container: wp-certbot
+        command: >-
+          certbot certonly --non-interactive --webroot --webroot-path /var/www/certbot {{staging}}
+          --email {{email}} --cert-name {{server_name}} {{certbot_domains}}
+          --rsa-key-size 4096 --agree-tos --force-renewal
+      register: certbot
+
+
+    - name: Debug certbot output
+      debug:
+        var: certbot
+
+    - name: wait for certbot
+      wait_for:
+        path: /var/log/certbot/letsencrypt.log
+        search_regex: 'This certificate expires on'
+        state: present
+        timeout: 60
+      when: not cert.stat.exists
+
+    - name: Restart nginx with prod certificate
+      docker_container:
+        name: wp-site
+        state: started
+        restart: yes
+
+    - name: Sanity check wait for nginx
+      wait_for: port=80
+

@@ -1,0 +1,60 @@
+upstream php {
+    server unix:/tmp/php-cgi.socket;
+    server php:9000;
+}
+
+server {
+    listen 80;
+    server_name {{ server_name_nginx }};
+
+    root /var/www/html;
+
+    index index.php;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location ~ \.php$ {
+        include fastcgi.conf;
+        fastcgi_intercept_errors on;
+        fastcgi_pass php;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico)$ {
+        expires max;
+        log_not_found off;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name {{ server_name_nginx }};
+
+    root /var/www/html;
+
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location ~ \.php$ {
+        include fastcgi.conf;
+        fastcgi_intercept_errors on;
+        fastcgi_pass php;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico)$ {
+        expires max;
+        log_not_found off;
+    }
+
+    ssl_certificate /etc/letsencrypt/live/{{ server_name }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ server_name }}/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+}
